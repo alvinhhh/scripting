@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apex Academy Toolkit
 // @namespace    local.apex.academy.toolkit
-// @version      1.0.1
+// @version      1.0.2
 // @description  Combined Gmail and Google Calendar tools: draft duplication, Apex invoice/payroll helper, student reminder copying, and Day-view calendar labels.
 // @match        https://mail.google.com/*
 // @match        https://calendar.google.com/*
@@ -1285,6 +1285,10 @@
       let stopButton = null;
       let dismissButton = null;
       let openMenu = null;
+      let outsideMenuPointerHandler = null;
+      let menuKeyHandler = null;
+      let menuResizeHandler = null;
+      let menuScrollHandler = null;
 
       const composeButtons = new WeakMap();
 
@@ -1418,21 +1422,15 @@
           cursor: pointer;
         }
 
-        .apex-titlebar-host {
-          position: relative !important;
-        }
-
         /*
-         * Absolutely positioned so it does NOT take up flex/layout space.
-         * This prevents it from pushing Gmail's minimize/maximize/close
-         * controls out of the compose window.
+         * Portal button: fixed to the viewport and positioned over the exact
+         * center of each compose title bar. It never participates in Gmail's
+         * flex layout, so Gmail cannot collapse it into the window controls.
          */
         .apex-compose-button {
-          position: absolute !important;
-          left: 50% !important;
-          top: 50% !important;
+          position: fixed !important;
           transform: translate(-50%, -50%) !important;
-          z-index: 10 !important;
+          z-index: 2147483600 !important;
 
           margin: 0 !important;
           box-sizing: border-box;
@@ -4116,9 +4114,43 @@
       function closeApexMenu() {
         if (openMenu) {
           openMenu.remove();
+          openMenu = null;
+        }
 
-          openMenu =
-            null;
+        if (outsideMenuPointerHandler) {
+          document.removeEventListener(
+            'pointerdown',
+            outsideMenuPointerHandler,
+            true
+          );
+          outsideMenuPointerHandler = null;
+        }
+
+        if (menuKeyHandler) {
+          document.removeEventListener(
+            'keydown',
+            menuKeyHandler,
+            true
+          );
+          menuKeyHandler = null;
+        }
+
+        if (menuResizeHandler) {
+          window.removeEventListener(
+            'resize',
+            menuResizeHandler,
+            true
+          );
+          menuResizeHandler = null;
+        }
+
+        if (menuScrollHandler) {
+          document.removeEventListener(
+            'scroll',
+            menuScrollHandler,
+            true
+          );
+          menuScrollHandler = null;
         }
       }
 
@@ -4225,20 +4257,65 @@
           menu
         );
 
-        openMenu =
-          menu;
+        menu.__apexButton = button;
+        openMenu = menu;
 
-        setTimeout(
-          () => {
-            document.addEventListener(
-              'click',
-              closeApexMenu,
-              {
-                once: true
-              }
-            );
-          },
-          0
+        /*
+         * Gmail stops propagation for many of its controls, so a normal
+         * document click listener can miss click-away events. Capture-phase
+         * pointerdown sees them before Gmail can swallow them.
+         */
+        outsideMenuPointerHandler = event => {
+          if (!openMenu) {
+            return;
+          }
+
+          const target = event.target;
+
+          if (
+            openMenu.contains(target) ||
+            button.contains(target)
+          ) {
+            return;
+          }
+
+          closeApexMenu();
+        };
+
+        menuKeyHandler = event => {
+          if (event.key === 'Escape') {
+            closeApexMenu();
+          }
+        };
+
+        menuResizeHandler = () =>
+          closeApexMenu();
+
+        menuScrollHandler = () =>
+          closeApexMenu();
+
+        document.addEventListener(
+          'pointerdown',
+          outsideMenuPointerHandler,
+          true
+        );
+
+        document.addEventListener(
+          'keydown',
+          menuKeyHandler,
+          true
+        );
+
+        window.addEventListener(
+          'resize',
+          menuResizeHandler,
+          true
+        );
+
+        document.addEventListener(
+          'scroll',
+          menuScrollHandler,
+          true
         );
       }
 
@@ -4246,7 +4323,7 @@
        * CENTERED TITLE-BAR BUTTON
        ********************************************************************/
 
-      function findNewMessageTitle(
+      function composeTitlebarRect(
         compose
       ) {
         const container =
@@ -4254,64 +4331,139 @@
             compose
           );
 
-        return all(
-          container ||
-          compose,
-          'div, span'
-        ).find(
-          el =>
-            visible(el) &&
-            el.childElementCount ===
-              0 &&
-            el.textContent
-              .trim() ===
-              'New Message'
-        );
-      }
-
-      function titleBarHost(
-        compose
-      ) {
-        const title =
-          findNewMessageTitle(
-            compose
-          );
-
-        if (
-          title
-            ?.parentElement
-        ) {
-          return {
-            title,
-            host:
-              title.parentElement
-          };
+        if (!container) {
+          return null;
         }
 
-        /*
-         * Fallback: titlebar containing Minimize.
-         */
+        const containerRect =
+          container.getBoundingClientRect();
+
+        if (
+          containerRect.width <= 0 ||
+          containerRect.height <= 0
+        ) {
+          return null;
+        }
+
         const minimize =
           minimizeButton(
             compose
           );
 
-        if (
+        let best = null;
+        let node =
           minimize
-            ?.parentElement
+            ?.parentElement ||
+          null;
+
+        while (
+          node &&
+          node !== document.body
         ) {
-          return {
-            title: null,
-            host:
-              minimize
-                .parentElement
-          };
+          const rect =
+            node.getBoundingClientRect();
+
+          const wideEnough =
+            rect.width >=
+              Math.min(
+                containerRect.width * 0.55,
+                240
+              );
+
+          const titlebarHeight =
+            rect.height >= 24 &&
+            rect.height <= 80;
+
+          const nearTop =
+            rect.top >=
+              containerRect.top - 6 &&
+            rect.top <=
+              containerRect.top + 85;
+
+          if (
+            wideEnough &&
+            titlebarHeight &&
+            nearTop
+          ) {
+            best = rect;
+          }
+
+          if (node === container) {
+            break;
+          }
+
+          node = node.parentElement;
         }
 
+        if (best) {
+          return best;
+        }
+
+        /*
+         * Last-resort titlebar rectangle. The compose header is normally
+         * ~40px tall, and centering against the compose itself is safer than
+         * ever attaching the Apex control to Gmail's window-button group.
+         */
         return {
-          title: null,
-          host: null
+          left: containerRect.left,
+          top: containerRect.top,
+          width: containerRect.width,
+          height: Math.min(
+            40,
+            containerRect.height
+          )
         };
+      }
+
+      function positionApexButton(
+        button,
+        compose
+      ) {
+        const container =
+          composeContainer(
+            compose
+          );
+
+        if (
+          !button?.isConnected ||
+          !compose?.isConnected ||
+          !container?.isConnected
+        ) {
+          return false;
+        }
+
+        const containerRect =
+          container.getBoundingClientRect();
+
+        const titlebarRect =
+          composeTitlebarRect(
+            compose
+          );
+
+        if (
+          !titlebarRect ||
+          containerRect.width <= 0 ||
+          containerRect.height <= 0
+        ) {
+          button.hidden = true;
+          return false;
+        }
+
+        button.hidden = false;
+
+        button.style.left =
+          `${Math.round(
+            containerRect.left +
+            containerRect.width / 2
+          )}px`;
+
+        button.style.top =
+          `${Math.round(
+            titlebarRect.top +
+            titlebarRect.height / 2
+          )}px`;
+
+        return true;
       }
 
       function installButton(
@@ -4324,141 +4476,132 @@
           return;
         }
 
-        const container =
-          composeContainer(
-            compose
-          );
-
-        if (!container) {
-          return;
-        }
-
-        /*
-         * If an earlier revision somehow left multiple
-         * buttons in this compose, clean them first.
-         */
-        const existing =
-          all(
-            container,
-            '.apex-compose-button'
-          );
-
-        if (
-          existing.length >
-          1
-        ) {
-          existing
-            .slice(1)
-            .forEach(
-              button =>
-                button.remove()
-            );
-        }
-
-        /*
-         * WeakMap tracks compose -> button.
-         */
-        const tracked =
+        let button =
           composeButtons.get(
             compose
           );
 
         if (
-          tracked
+          !button
             ?.isConnected
         ) {
-          return;
-        }
+          button =
+            document.createElement(
+              'button'
+            );
 
-        /*
-         * Adopt an already-existing button if Gmail kept one.
-         */
-        if (
-          existing[0]
-            ?.isConnected
-        ) {
+          button.type =
+            'button';
+
+          button.className =
+            'apex-compose-button';
+
+          button.dataset.apexHelper =
+            'true';
+
+          button.textContent =
+            'Apex ▾';
+
+          button.title =
+            'Apex Academy';
+
+          /*
+           * Keep an owner pointer so orphaned portal buttons can be cleaned
+           * up if Gmail replaces a compose root.
+           */
+          button.__apexCompose =
+            compose;
+
+          button.addEventListener(
+            'click',
+            event => {
+              event.preventDefault();
+              event.stopPropagation();
+
+              if (
+                openMenu &&
+                openMenu.__apexButton ===
+                  button
+              ) {
+                closeApexMenu();
+                return;
+              }
+
+              showApexMenu(
+                button,
+                compose
+              );
+            }
+          );
+
           composeButtons.set(
             compose,
-            existing[0]
+            button
           );
 
-          return;
+          /*
+           * Portal into body instead of Gmail's titlebar DOM. Gmail freely
+           * rebuilds the title text (New Message -> Draft saved), but this
+           * button survives those rebuilds and remains independent of the
+           * minimize/maximize/close flex group.
+           */
+          document.body.appendChild(
+            button
+          );
         }
 
-        const {
-          host
-        } =
-          titleBarHost(
-            compose
-          );
-
-        if (!host) {
-          return;
-        }
-
-        /*
-         * The button is absolute-positioned relative to
-         * the title bar so it consumes ZERO layout width.
-         */
-        host.classList.add(
-          'apex-titlebar-host'
-        );
-
-        const button =
-          document.createElement(
-            'button'
-          );
-
-        button.type =
-          'button';
-
-        button.className =
-          'apex-compose-button';
-
-        button.dataset.apexHelper =
-          'true';
-
-        button.textContent =
-          'Apex ▾';
-
-        button.title =
-          'Apex Academy';
-
-        button.addEventListener(
-          'click',
-          event => {
-            event.preventDefault();
-            event.stopPropagation();
-
-            showApexMenu(
-              button,
-              compose
-            );
-          }
-        );
-
-        /*
-         * Track BEFORE append because append itself
-         * triggers the MutationObserver.
-         */
-        composeButtons.set(
-          compose,
-          button
-        );
-
-        host.appendChild(
-          button
+        positionApexButton(
+          button,
+          compose
         );
       }
 
       function scan() {
+        const liveComposes =
+          new Set(
+            composes()
+          );
+
         for (
           const compose
-          of composes()
+          of liveComposes
         ) {
           installButton(
             compose
           );
+        }
+
+        /*
+         * Portal buttons live under document.body, so explicitly remove any
+         * whose compose window Gmail has destroyed or replaced.
+         */
+        for (
+          const button
+          of all(
+            document,
+            '.apex-compose-button'
+          )
+        ) {
+          const owner =
+            button.__apexCompose;
+
+          if (
+            owner?.isConnected &&
+            liveComposes.has(
+              owner
+            )
+          ) {
+            continue;
+          }
+
+          if (
+            openMenu?.__apexButton ===
+              button
+          ) {
+            closeApexMenu();
+          }
+
+          button.remove();
         }
       }
 
@@ -4496,6 +4639,21 @@
           childList: true,
           subtree: true
         }
+      );
+
+      /*
+       * Gmail can move/resize a compose without changing child nodes (for
+       * example while dragging it). Keep the portal button locked to the
+       * titlebar center even in those cases.
+       */
+      window.setInterval(
+        scan,
+        350
+      );
+
+      window.addEventListener(
+        'resize',
+        scan
       );
 
       /********************************************************************
