@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apex Academy Toolkit
 // @namespace    local.apex.academy.toolkit
-// @version      1.0.2
+// @version      1.0.3
 // @description  Combined Gmail and Google Calendar tools: draft duplication, Apex invoice/payroll helper, student reminder copying, and Day-view calendar labels.
 // @match        https://mail.google.com/*
 // @match        https://calendar.google.com/*
@@ -6804,16 +6804,13 @@
         }
 
         function makeMeetMessage(
-            title,
-            start,
-            timezone,
-            conferenceInfo
+            time,
+            timezoneLabel,
+            meetLink
         ) {
             return (
-                `${title}\n` +
-                `${formatDate(start, timezone)} · ${formatTime(start, timezone)}\n` +
-                `Time zone: ${timezone}\n` +
-                conferenceInfo
+                `Just a friendly reminder of your session today at ${time.replace(/([ap])m$/, ' $1.m.')} ${timezoneLabel}!\n\n` +
+                meetLink
             );
         }
 
@@ -7035,18 +7032,14 @@
                     );
 
                 if (meetLink) {
-                    const conferenceInfo =
-                        await getMeetConferenceInfo(
-                            popup,
-                            meetLink
-                        );
-
                     const message =
                         makeMeetMessage(
-                            title,
-                            start,
-                            studentTimezone,
-                            conferenceInfo
+                            formatTime(
+                                start,
+                                studentTimezone
+                            ),
+                            tzInfo.label,
+                            meetLink
                         );
 
                     copyText(
