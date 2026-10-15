@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apex Academy Toolkit
 // @namespace    local.apex.academy.toolkit
-// @version      1.0.3
+// @version      1.0.4
 // @description  Combined Gmail and Google Calendar tools: draft duplication, Apex invoice/payroll helper, student reminder copying, and Day-view calendar labels.
 // @match        https://mail.google.com/*
 // @match        https://calendar.google.com/*
@@ -6421,12 +6421,9 @@
                     'a[href*="meet.google.com/"]'
                 );
 
-            if (a?.href) {
-                return a.href;
-            }
-
             const m =
                 String(
+                    a?.href ||
                     scope.innerText ||
                     ''
                 )

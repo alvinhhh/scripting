@@ -41,6 +41,20 @@ async function copy({ popup = null, card = scope(), title = 'Session',
 
 const meetLink = 'https://meet.google.com/abc-defg-hij';
 
+test('Meet reminders strip everything after the meeting code', async () => {
+    for (const suffix of ['?authuser=1&hs=122', '#details', '/extra?authuser=1#details']) {
+        for (const event of [
+            { popup: scope(meetLink + suffix) },
+            { card: scope(meetLink + suffix) },
+            { card: scope(null, `Join: ${meetLink}${suffix}`) }
+        ]) {
+            const result = await copy(event);
+            assert.deepEqual(result.copied, [`Just a friendly reminder of your session today at 12:30 p.m. ET!\n\n${meetLink}`]);
+            assert.deepEqual(result.errors, []);
+        }
+    }
+});
+
 test('Meet popup link uses the requested format and converted student time', async () => {
     const result = await copy({ popup: scope(meetLink), timezone: 'America/Los_Angeles', label: 'PT' });
     assert.deepEqual(result, {
