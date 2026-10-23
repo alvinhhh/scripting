@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apex Academy Toolkit
 // @namespace    local.apex.academy.toolkit
-// @version      1.0.4
+// @version      1.0.5
 // @description  Combined Gmail and Google Calendar tools: draft duplication, Apex invoice/payroll helper, student reminder copying, and Day-view calendar labels.
 // @match        https://mail.google.com/*
 // @match        https://calendar.google.com/*
@@ -6421,9 +6421,12 @@
                     'a[href*="meet.google.com/"]'
                 );
 
+            if (a?.href) {
+                return a.href;
+            }
+
             const m =
                 String(
-                    a?.href ||
                     scope.innerText ||
                     ''
                 )
@@ -6800,14 +6803,48 @@
             );
         }
 
+        function meetEndFromEvent(start, popup, card) {
+            const date = timezoneParts(start, CALENDAR_TIMEZONE);
+
+            for (const text of [
+                popup?.innerText,
+                card?.getAttribute?.('aria-label'),
+                card?.innerText
+            ]) {
+                const times = parseTimeRange(text);
+                if (!times?.end) continue;
+
+                let end = wallClockToInstant(
+                    { ...date, ...times.end },
+                    CALENDAR_TIMEZONE
+                );
+
+                if (end <= start) {
+                    end = wallClockToInstant(
+                        { ...date, day: date.day + 1, ...times.end },
+                        CALENDAR_TIMEZONE
+                    );
+                }
+
+                return end;
+            }
+
+            return null;
+        }
+
         function makeMeetMessage(
-            time,
-            timezoneLabel,
-            meetLink
+            title,
+            start,
+            end,
+            timezone,
+            conferenceInfo
         ) {
             return (
-                `Just a friendly reminder of your session today at ${time.replace(/([ap])m$/, ' $1.m.')} ${timezoneLabel}!\n\n` +
-                meetLink
+                `${title}\n` +
+                `${formatDate(start, timezone)} · ${formatTime(start, timezone)} - ${formatTime(end, timezone)} ` +
+                `(${formatTime(start, CALENDAR_TIMEZONE)} - ${formatTime(end, CALENDAR_TIMEZONE)} PST)\n` +
+                `Time zone: ${timezone}\n` +
+                conferenceInfo
             );
         }
 
@@ -7029,14 +7066,27 @@
                     );
 
                 if (meetLink) {
+                    const end = meetEndFromEvent(start, popup, card);
+
+                    if (!end) {
+                        throw new Error(
+                            'Could not determine the event end time.'
+                        );
+                    }
+
+                    const conferenceInfo =
+                        await getMeetConferenceInfo(
+                            popup,
+                            meetLink
+                        );
+
                     const message =
                         makeMeetMessage(
-                            formatTime(
-                                start,
-                                studentTimezone
-                            ),
-                            tzInfo.label,
-                            meetLink
+                            title,
+                            start,
+                            end,
+                            studentTimezone,
+                            conferenceInfo
                         );
 
                     copyText(
