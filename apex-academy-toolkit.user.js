@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apex Academy Toolkit
 // @namespace    local.apex.academy.toolkit
-// @version      1.0.5
+// @version      1.0.6
 // @description  Combined Gmail and Google Calendar tools: draft duplication, Apex invoice/payroll helper, student reminder copying, and Day-view calendar labels.
 // @match        https://mail.google.com/*
 // @match        https://calendar.google.com/*
@@ -6839,10 +6839,16 @@
             timezone,
             conferenceInfo
         ) {
+            const isPacific = new Intl.DateTimeFormat('en-US', {
+                timeZone: timezone
+            }).resolvedOptions().timeZone === CALENDAR_TIMEZONE;
+            const pacificRange = isPacific
+                ? ''
+                : ` (${formatTime(start, CALENDAR_TIMEZONE)} - ${formatTime(end, CALENDAR_TIMEZONE)} PST)`;
+
             return (
                 `${title}\n` +
-                `${formatDate(start, timezone)} · ${formatTime(start, timezone)} - ${formatTime(end, timezone)} ` +
-                `(${formatTime(start, CALENDAR_TIMEZONE)} - ${formatTime(end, CALENDAR_TIMEZONE)} PST)\n` +
+                `${formatDate(start, timezone)} · ${formatTime(start, timezone)} - ${formatTime(end, timezone)}${pacificRange}\n` +
                 `Time zone: ${timezone}\n` +
                 conferenceInfo
             );

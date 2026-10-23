@@ -85,6 +85,32 @@ test('Pacific conversion follows summer and winter offsets while retaining the r
     assert.deepEqual(result.errors, []);
 });
 
+test('Pacific sessions omit the repeated range in summer and winter', async () => {
+    for (const eventTitle of ['Demo Student, CA Time', 'Demo Student, Nevada Time']) {
+        for (const [start, day] of [
+            ['2026-07-15T23:00:00Z', 'Wednesday, July 15'],
+            ['2026-12-16T00:00:00Z', 'Tuesday, December 15']
+        ]) {
+            const result = await copy({
+                eventTitle, start: new Date(start), timezone: 'America/Los_Angeles',
+                popup: scope(meetLink, '4pm - 5pm')
+            });
+            assert.deepEqual(result.copied, [
+                `${eventTitle}\n${day} · 4:00pm - 5:00pm\nTime zone: America/Los_Angeles\n${conferenceInfo(meetLink)}`
+            ]);
+            assert.deepEqual(result.errors, []);
+        }
+    }
+});
+
+test('Equivalent Pacific timezone aliases also omit the repeated range', async () => {
+    const result = await copy({ timezone: 'US/Pacific', popup: scope(meetLink, '4pm - 5pm') });
+    assert.deepEqual(result.copied, [
+        `${title}\nWednesday, July 15 · 4:00pm - 5:00pm\nTime zone: US/Pacific\n${conferenceInfo(meetLink)}`
+    ]);
+    assert.deepEqual(result.errors, []);
+});
+
 test('Meet anchor links keep query parameters, fragments, and paths', async () => {
     for (const suffix of ['?authuser=1&hs=122', '#details', '/extra?authuser=1#details']) {
         for (const event of [
