@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apex Academy Toolkit
 // @namespace    local.apex.academy.toolkit
-// @version      1.0.6
+// @version      1.0.7
 // @description  Combined Gmail and Google Calendar tools: draft duplication, Apex invoice/payroll helper, student reminder copying, and Day-view calendar labels.
 // @match        https://mail.google.com/*
 // @match        https://calendar.google.com/*
@@ -4753,6 +4753,7 @@
             'PHOENIX': 'America/Phoenix',
 
             // Eastern
+            'NY': 'America/New_York',
             'NC': 'America/New_York',
             'NORTH CAROLINA': 'America/New_York',
             'ET': 'America/New_York',
@@ -4764,15 +4765,45 @@
 
             // Central
             'CT': 'America/Chicago',
+            'CST': 'America/Chicago',
+            'CDT': 'America/Chicago',
             'CENTRAL': 'America/Chicago',
             'CENTRAL TIME': 'America/Chicago',
             'CHICAGO': 'America/Chicago',
 
             // Mountain
             'MT': 'America/Denver',
+            'MST': 'America/Denver',
+            'MDT': 'America/Denver',
             'MOUNTAIN': 'America/Denver',
             'MOUNTAIN TIME': 'America/Denver',
             'DENVER': 'America/Denver',
+
+            // Alaska / Hawaii / Aleutian Islands
+            'AK': 'America/Anchorage',
+            'ALASKA': 'America/Anchorage',
+            'AKT': 'America/Anchorage',
+            'AKST': 'America/Anchorage',
+            'AKDT': 'America/Anchorage',
+            'HI': 'Pacific/Honolulu',
+            'HAWAII': 'Pacific/Honolulu',
+            'HST': 'Pacific/Honolulu',
+            'ALEUTIAN': 'America/Adak',
+            'HAWAII ALEUTIAN': 'America/Adak',
+            'HAST': 'America/Adak',
+            'HADT': 'America/Adak',
+            'HDT': 'America/Adak',
+
+            // US territories
+            'AT': 'America/Puerto_Rico',
+            'AST': 'America/Puerto_Rico',
+            'ATLANTIC': 'America/Puerto_Rico',
+            'CHST': 'Pacific/Guam',
+            'CHAMORRO': 'Pacific/Guam',
+            'GUAM': 'Pacific/Guam',
+            'AS': 'Pacific/Pago_Pago',
+            'SST': 'Pacific/Pago_Pago',
+            'AMERICAN SAMOA': 'Pacific/Pago_Pago',
 
             // International
             'UK': 'Europe/London',
@@ -5413,6 +5444,22 @@
                     .map(clean)
                     .filter(Boolean);
 
+            const saved = getSavedAliases();
+
+            for (const piece of pieces.length > 1 ? pieces.slice(1) : pieces) {
+                const label = piece.replace(/^\((.*)\)$/, '$1').trim();
+                const raw = label.replace(/\s+\(?(?:EST|EDT|ET|PST|PDT|PT|CST|CDT|CT|MST|MDT|MT|AKT|AKST|AKDT|HST|HDT|HAST|HADT|AT|AST|CHST|SST|JST|KST)\)?$/i, '').trim();
+
+                for (const candidate of [label, raw]) {
+                    const key = normalizeAlias(candidate);
+                    const timezone = TIMEZONE_ALIASES[key] || saved[key];
+
+                    if (timezone && validTimezone(timezone)) {
+                        return { label: piece, raw: candidate, timezone: null };
+                    }
+                }
+            }
+
             let timePiece =
                 pieces.find(
                     piece =>
@@ -5500,14 +5547,6 @@
                 return info.timezone;
             }
 
-            if (
-                validTimezone(
-                    info.raw
-                )
-            ) {
-                return info.raw;
-            }
-
             const key =
                 normalizeAlias(
                     info.raw
@@ -5538,6 +5577,14 @@
                 )
             ) {
                 return saved[key];
+            }
+
+            if (
+                validTimezone(
+                    info.raw
+                )
+            ) {
+                return info.raw;
             }
 
             // Nairobi Time -> Africa/Nairobi, etc.

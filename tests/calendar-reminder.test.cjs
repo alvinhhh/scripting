@@ -14,6 +14,33 @@ const functions = [
     return match[0];
 }).join('\n');
 
+const timezoneAliases = source.match(/^        const TIMEZONE_ALIASES = \{[\s\S]*?^        };/m);
+assert.ok(timezoneAliases, 'Missing timezone aliases');
+const timezoneFunctions = timezoneAliases[0] + '\n' + [
+    'clean', 'validTimezone', 'normalizeAlias', 'getSavedAliases', 'saveAlias',
+    'supportedTimezones', 'extractTimezoneInfo', 'autoFindIANA', 'resolveTimezone'
+].map(name => {
+    const match = source.match(new RegExp(`^        function ${name}\\([\\s\\S]*?^        }`, 'm'));
+    assert.ok(match, `Missing timezone function: ${name}`);
+    return match[0];
+}).join('\n');
+
+function timezoneGlobals(savedAliases = {}) {
+    return {
+        CUSTOM_TZ_STORAGE: 'test-timezones',
+        GM_getValue: () => JSON.stringify(savedAliases),
+        GM_setValue: () => {},
+        prompt: () => { throw new Error('Unexpected timezone prompt'); }
+    };
+}
+
+function resolveTitle(eventTitle, savedAliases = {}) {
+    const context = vm.createContext(timezoneGlobals(savedAliases));
+    vm.runInContext(timezoneFunctions, context);
+    const info = context.extractTimezoneInfo(eventTitle);
+    return { label: info.label, timezone: context.resolveTimezone(info) };
+}
+
 function scope(href = null, innerText = '', ariaLabel = '') {
     return {
         innerText,
@@ -29,13 +56,14 @@ const title = 'Demo Session (Puerto Rico Time)';
 const existingClipboard = 'Existing clipboard text';
 
 async function copy({ popup = null, card = scope(), eventTitle = title,
-    start = new Date('2026-07-15T23:00:00Z'), timezone = 'America/Puerto_Rico', label = 'Puerto Rico Time' } = {}) {
+    start = new Date('2026-07-15T23:00:00Z'), timezone = 'America/Puerto_Rico', label = 'Puerto Rico Time', realTimezone = false, savedAliases = {} } = {}) {
     const copied = [];
     const closed = [];
     const errors = [];
     const conferenceCalls = [];
     let clipboard = existingClipboard;
     const context = vm.createContext({
+        ...timezoneGlobals(savedAliases),
         CALENDAR_TIMEZONE: 'America/Los_Angeles', TAG: '[test]',
         ZOOM_URL: 'https://zoom.us/j/123456789', ZOOM_ID: '123456789', ZOOM_PASSWORD: 'example',
         isAgendaView: () => true, setButtonState: () => {},
@@ -51,6 +79,7 @@ async function copy({ popup = null, card = scope(), eventTitle = title,
         sleep: async () => {}, console: { error: () => {} }, alert: value => errors.push(value)
     });
     vm.runInContext(functions, context);
+    if (realTimezone) vm.runInContext(timezoneFunctions, context);
     await context.copyReminder(card, {}, {});
     assert.equal(closed.length, popup ? 1 : 0);
     return { copied, errors, clipboard, conferenceCalls };
@@ -186,4 +215,84 @@ test('Missing start reports an error without replacing the clipboard', async () 
     assert.deepEqual(result.copied, []);
     assert.equal(result.clipboard, existingClipboard);
     assert.deepEqual(result.errors, ['Copy reminder failed:\n\nCould not determine the event start time.']);
+});
+
+test('New York labels without Time resolve to daylight-aware Eastern time', () => {
+    for (const label of ['NY EST', 'NY', 'EST', 'North Carolina EST', 'NC (EST)', 'North Carolina Time (EST)']) {
+        assert.deepEqual(resolveTitle(`Demo Student, ${label}, Chemistry`), {
+            label, timezone: 'America/New_York'
+        });
+    }
+});
+
+test('All US timezone aliases use regional summer and winter rules', () => {
+    const dates = [new Date('2026-07-15T22:30:00Z'), new Date('2026-12-15T23:30:00Z')];
+    const zones = [
+        [['NY', 'NEW YORK', 'NC', 'NORTH CAROLINA', 'EASTERN', 'ET', 'EST', 'EDT'], 'America/New_York', ['6:30pm', '6:30pm']],
+        [['CENTRAL', 'CT', 'CST', 'CDT'], 'America/Chicago', ['5:30pm', '5:30pm']],
+        [['MOUNTAIN', 'MT', 'MST', 'MDT'], 'America/Denver', ['4:30pm', '4:30pm']],
+        [['CA', 'CALIFORNIA', 'PACIFIC', 'PT', 'PST', 'PDT'], 'America/Los_Angeles', ['3:30pm', '3:30pm']],
+        [['AZ', 'ARIZONA'], 'America/Phoenix', ['3:30pm', '4:30pm']],
+        [['AK', 'ALASKA', 'AKT', 'AKST', 'AKDT'], 'America/Anchorage', ['2:30pm', '2:30pm']],
+        [['HI', 'HAWAII', 'HST'], 'Pacific/Honolulu', ['12:30pm', '1:30pm']],
+        [['ALEUTIAN', 'HAWAII-ALEUTIAN', 'HAST', 'HADT', 'HDT'], 'America/Adak', ['1:30pm', '1:30pm']],
+        [['PR', 'PUERTO RICO', 'ATLANTIC', 'AT', 'AST'], 'America/Puerto_Rico', ['6:30pm', '7:30pm']],
+        [['CHST', 'CHAMORRO', 'GUAM'], 'Pacific/Guam', ['8:30am', '9:30am']],
+        [['AS', 'SST', 'AMERICAN SAMOA'], 'Pacific/Pago_Pago', ['11:30am', '12:30pm']]
+    ];
+    for (const [labels, timezone, times] of zones) {
+        for (const label of labels) {
+            const resolved = resolveTitle(`Demo Student, ${label}, Chemistry`);
+            assert.equal(resolved.timezone, timezone, label);
+            dates.forEach((date, i) => {
+                const time = new Intl.DateTimeFormat('en-US', {
+                    timeZone: resolved.timezone, hour: 'numeric', minute: '2-digit', hour12: true
+                }).format(date).replace(/\s+/g, '').toLowerCase();
+                assert.equal(time, times[i], `${label} ${date.toISOString()}`);
+            });
+        }
+    }
+});
+
+test('Timezone detection preserves defaults, international labels, IANA zones, and saved aliases', () => {
+    for (const eventTitle of ['Demo Student, Chemistry', 'Demo Student, CA Time, Chemistry', 'India, CA Time, Chemistry', 'India, Chemistry', 'Demo Student, History of New York', 'Demo Student, Japan Math']) {
+        assert.equal(resolveTitle(eventTitle).timezone, 'America/Los_Angeles', eventTitle);
+    }
+    for (const [label, timezone] of [
+        ['Puerto Rico Time', 'America/Puerto_Rico'], ['Japan Time', 'Asia/Tokyo'],
+        ['North Carolina Time', 'America/New_York'], ['Europe/London', 'Europe/London'],
+        ['(NY EST)', 'America/New_York'], ['Pacific Time (PST)', 'America/Los_Angeles']
+    ]) {
+        assert.equal(resolveTitle(`Demo Student, ${label}, Chemistry`).timezone, timezone, label);
+    }
+    assert.equal(resolveTitle('Demo Student, Nevada Time, Chemistry', { NEVADA: 'America/Los_Angeles' }).timezone, 'America/Los_Angeles');
+    assert.equal(resolveTitle('Demo Student, Custom Coast, Chemistry', { 'CUSTOM COAST': 'America/New_York' }).timezone, 'America/New_York');
+});
+
+test('Real NY EST extraction copies the correct full Zoom reminder in summer and winter', async () => {
+    for (const start of ['2026-10-23T22:30:00Z', '2026-12-15T23:30:00Z']) {
+        const result = await copy({
+            eventTitle: 'Demo Student, NY EST, Chemistry', start: new Date(start), realTimezone: true
+        });
+        assert.deepEqual(result.copied, ['Just a friendly reminder of your session at 6:30pm NY EST today! \n\nhttps://zoom.us/j/123456789\nMeeting ID 123456789\nMeeting Password example']);
+        assert.deepEqual(result.errors, []);
+    }
+});
+
+test('Real timezone resolution reaches Meet formatting and Pacific duplicate suppression', async () => {
+    for (const [zoneLabel, timezone, line] of [
+        ['NY EST', 'America/New_York', '6:30pm - 8:30pm (3:30pm - 5:30pm PST)'],
+        ['CA', 'America/Los_Angeles', '3:30pm - 5:30pm'],
+        ['Nevada Time', 'America/Los_Angeles', '3:30pm - 5:30pm']
+    ]) {
+        const eventTitle = `Demo Student, ${zoneLabel}, Chemistry`;
+        const result = await copy({
+            eventTitle, start: new Date('2026-10-23T22:30:00Z'), realTimezone: true,
+            savedAliases: { NEVADA: 'America/Los_Angeles' }, popup: scope(meetLink, '3:30pm - 5:30pm')
+        });
+        assert.deepEqual(result.copied, [
+            `${eventTitle}\nFriday, October 23 · ${line}\nTime zone: ${timezone}\n${conferenceInfo(meetLink)}`
+        ]);
+        assert.deepEqual(result.errors, []);
+    }
 });
