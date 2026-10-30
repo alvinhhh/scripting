@@ -4,10 +4,12 @@ const { test } = require('node:test');
 const vm = require('node:vm');
 
 const source = readFileSync(`${__dirname}/../apex-academy-toolkit.user.js`, 'utf8');
-const functions = [
-    'to24Hour', 'parseTimeRange', 'timezoneParts', 'wallClockToInstant',
-    'meetEndFromEvent', 'findMeetLink', 'formatTime', 'formatDate', 'isInPerson',
-    'makeInPersonMessage', 'makeZoomMessage', 'makeMeetMessage', 'copyText', 'copyReminder'
+const months = source.match(/^        const MONTHS = \{[\s\S]*?^        };/m);
+assert.ok(months, 'Missing month names');
+const functions = months[0] + '\n' + [
+    'parseDateText', 'to24Hour', 'parseTimeRange', 'timezoneParts', 'wallClockToInstant',
+    'validateEventStart', 'meetEndFromEvent', 'findMeetLink', 'formatTime', 'formatDate', 'isInPerson',
+    'timezoneLabel', 'makeInPersonMessage', 'makeZoomMessage', 'makeMeetMessage', 'copyText', 'copyReminder'
 ].map(name => {
     const match = source.match(new RegExp(`^        (?:async )?function ${name}\\([\\s\\S]*?^        }`, 'm'));
     assert.ok(match, `Missing function: ${name}`);
@@ -89,7 +91,7 @@ function expectedMessage(dateAndTimes, link = meetLink) {
     return `${title}\n${dateAndTimes}\nTime zone: America/Puerto_Rico\n${conferenceInfo(link)}`;
 }
 
-const summerLine = 'Wednesday, July 15 · 7:00pm - 8:00pm (4:00pm - 5:00pm PST)';
+const summerLine = 'Wednesday, July 15 · 7:00pm - 8:00pm (4:00pm - 5:00pm PDT)';
 
 test('Meet invitation includes both ranges and preserves the conference information', async () => {
     const eventTitle = 'Demo Student, North Carolina Time (EST), Counseling';
@@ -99,13 +101,13 @@ test('Meet invitation includes both ranges and preserves the conference informat
         popup: scope(link, 'Friday, October 23\n4 – 5pm')
     });
     assert.deepEqual(result.copied, [
-        `${eventTitle}\nFriday, October 23 · 7:00pm - 8:00pm (4:00pm - 5:00pm PST)\nTime zone: America/New_York\n${conferenceInfo(link)}`
+        `${eventTitle}\nFriday, October 23 · 7:00pm - 8:00pm (4:00pm - 5:00pm PDT)\nTime zone: America/New_York\n${conferenceInfo(link)}`
     ]);
     assert.deepEqual(result.errors, []);
     assert.equal(result.conferenceCalls.length, 1);
 });
 
-test('Pacific conversion follows summer and winter offsets while retaining the requested PST label', async () => {
+test('Pacific conversion uses the winter PST label', async () => {
     const result = await copy({
         start: new Date('2026-12-16T00:00:00Z'),
         popup: scope(meetLink, 'Tuesday, December 15\n4:00pm - 5:00pm')
@@ -186,7 +188,7 @@ test('Student date follows the converted start date', async () => {
         popup: scope(meetLink, '4pm - 5pm'), timezone: 'Asia/Manila'
     });
     assert.deepEqual(result.copied, [
-        `${title}\nThursday, July 16 · 7:00am - 8:00am (4:00pm - 5:00pm PST)\nTime zone: Asia/Manila\n${conferenceInfo(meetLink)}`
+        `${title}\nThursday, July 16 · 7:00am - 8:00am (4:00pm - 5:00pm PDT)\nTime zone: Asia/Manila\n${conferenceInfo(meetLink)}`
     ]);
     assert.deepEqual(result.errors, []);
 });
@@ -270,18 +272,18 @@ test('Timezone detection preserves defaults, international labels, IANA zones, a
 });
 
 test('Real NY EST extraction copies the correct full Zoom reminder in summer and winter', async () => {
-    for (const start of ['2026-10-23T22:30:00Z', '2026-12-15T23:30:00Z']) {
+    for (const [start, abbreviation] of [['2026-10-23T22:30:00Z', 'EDT'], ['2026-12-15T23:30:00Z', 'EST']]) {
         const result = await copy({
             eventTitle: 'Demo Student, NY EST, Chemistry', start: new Date(start), realTimezone: true
         });
-        assert.deepEqual(result.copied, ['Just a friendly reminder of your session at 6:30pm NY EST today! \n\nhttps://zoom.us/j/123456789\nMeeting ID 123456789\nMeeting Password example']);
+        assert.deepEqual(result.copied, [`Just a friendly reminder of your session at 6:30pm NY ${abbreviation} today! \n\nhttps://zoom.us/j/123456789\nMeeting ID 123456789\nMeeting Password example`]);
         assert.deepEqual(result.errors, []);
     }
 });
 
 test('Real timezone resolution reaches Meet formatting and Pacific duplicate suppression', async () => {
     for (const [zoneLabel, timezone, line] of [
-        ['NY EST', 'America/New_York', '6:30pm - 8:30pm (3:30pm - 5:30pm PST)'],
+        ['NY EST', 'America/New_York', '6:30pm - 8:30pm (3:30pm - 5:30pm PDT)'],
         ['CA', 'America/Los_Angeles', '3:30pm - 5:30pm'],
         ['Nevada Time', 'America/Los_Angeles', '3:30pm - 5:30pm']
     ]) {
@@ -295,4 +297,236 @@ test('Real timezone resolution reaches Meet formatting and Pacific duplicate sup
         ]);
         assert.deepEqual(result.errors, []);
     }
+});
+
+function timeContext() {
+    const context = vm.createContext({ CALENDAR_TIMEZONE: 'America/Los_Angeles' });
+    vm.runInContext(functions, context);
+    return context;
+}
+
+function wallTime(month, day, hour, minute = 0) {
+    return { year: 2026, month, day, hour, minute };
+}
+
+test('Arizona and Puerto Rico keep fixed offsets across the Pacific fall DST change', async () => {
+    for (const [zoneLabel, timezone, before, after] of [
+        ['AZ MST Time', 'America/Phoenix', '4:00pm - 5:00pm', '5:00pm - 6:00pm'],
+        ['PR EST Time', 'America/Puerto_Rico', '7:00pm - 8:00pm', '8:00pm - 9:00pm']
+    ]) {
+        const eventTitle = `Demo Student, ${zoneLabel}, Chemistry`;
+        for (const [start, day, range, pacificAbbreviation] of [
+            ['2026-10-31T23:00:00Z', 'Saturday, October 31', before, 'PDT'],
+            ['2026-11-02T00:00:00Z', 'Sunday, November 1', after, 'PST']
+        ]) {
+            const result = await copy({ eventTitle, start: new Date(start), realTimezone: true,
+                popup: scope(meetLink, '4pm - 5pm') });
+            assert.deepEqual(result.copied, [
+                `${eventTitle}\n${day} · ${range} (4:00pm - 5:00pm ${pacificAbbreviation})\nTime zone: ${timezone}\n${conferenceInfo(meetLink)}`
+            ]);
+            assert.deepEqual(result.errors, []);
+        }
+    }
+});
+
+test('Timezone parsing preserves regional exceptions in abbreviation and Time title forms', () => {
+    for (const [timezone, labels] of [
+        ['America/Phoenix', ['AZ MST Time', 'Arizona MST Time', 'AZ Time (MST)', 'Arizona Time (MDT)', 'AZ MST']],
+        ['America/Puerto_Rico', ['PR EST Time', 'Puerto Rico EST Time', 'PR Time (EST)', 'Puerto Rico Time (EDT)', 'PR EST']],
+        ['America/Denver', ['Navajo Nation', 'Navajo Time', 'Navajo Nation Time']]
+    ]) {
+        for (const label of labels) {
+            assert.equal(resolveTitle(`Demo Student, ${label}, Chemistry`).timezone, timezone, label);
+        }
+    }
+});
+
+test('Explicit IANA zones resolve case-insensitively including Etc zones', () => {
+    for (const [label, expected] of [
+        ['America/Phoenix', 'America/Phoenix'], ['america/phoenix', 'America/Phoenix'],
+        ['america/puerto_rico', 'America/Puerto_Rico'], ['europe/london', 'Europe/London'],
+        ['Etc/UTC', 'UTC'], ['etc/utc', 'UTC']
+    ]) {
+        const resolved = resolveTitle(`Demo Student, ${label}, Chemistry`);
+        const canonical = new Intl.DateTimeFormat('en-US', { timeZone: resolved.timezone }).resolvedOptions().timeZone;
+        assert.equal(canonical, expected, label);
+    }
+});
+
+test('Malformed explicit timezone tokens fail without copying a Pacific default', async () => {
+    for (const label of ['America/Not_A_Zone', 'america/not_a_zone', 'Etc/Not_A_Zone']) {
+        const result = await copy({ eventTitle: `Demo Student, ${label}, Chemistry`, realTimezone: true });
+        assert.deepEqual(result.copied, [], label);
+        assert.equal(result.clipboard, existingClipboard, label);
+        assert.equal(result.errors.length, 1, label);
+        assert.deepEqual(result.conferenceCalls, [], label);
+    }
+});
+
+test('Zoom labels use date-specific abbreviations while preserving the regional wording', async () => {
+    for (const [label, rendered] of [
+        ['Eastern Time (EST)', 'Eastern Time (EDT)'],
+        ['AZ MDT Time', 'AZ MST Time'],
+        ['PR EST Time', 'PR AST Time']
+    ]) {
+        const result = await copy({ eventTitle: `Demo Student, ${label}, Chemistry`, realTimezone: true,
+            start: new Date('2026-10-31T23:00:00Z') });
+        const time = label.startsWith('AZ') ? '4:00pm' : '7:00pm';
+        assert.deepEqual(result.copied, [
+            `Just a friendly reminder of your session at ${time} ${rendered} today! \n\nhttps://zoom.us/j/123456789\nMeeting ID 123456789\nMeeting Password example`
+        ]);
+        assert.deepEqual(result.errors, []);
+    }
+});
+
+test('Wall-clock conversion rejects nonexistent and repeated local times', () => {
+    const context = timeContext();
+    assert.throws(() => context.wallClockToInstant(wallTime(3, 8, 2, 30), 'America/Los_Angeles'));
+    assert.throws(() => context.wallClockToInstant(wallTime(11, 1, 1, 30), 'America/Los_Angeles'));
+    assert.equal(context.wallClockToInstant(wallTime(3, 8, 3, 30), 'America/Los_Angeles').toISOString(), '2026-03-08T10:30:00.000Z');
+    assert.equal(context.wallClockToInstant(wallTime(11, 1, 2, 30), 'America/Los_Angeles').toISOString(), '2026-11-01T10:30:00.000Z');
+});
+
+test('Known start constrains repeated-hour ends without inventing an overnight event', () => {
+    const context = timeContext();
+    const timezone = 'America/Los_Angeles';
+    const repeated = wallTime(11, 1, 1, 30);
+    assert.throws(() => context.wallClockToInstant(repeated, timezone, new Date('2026-11-01T07:30:00Z')));
+    assert.equal(context.wallClockToInstant(repeated, timezone, new Date('2026-11-01T08:45:00Z')).toISOString(), '2026-11-01T09:30:00.000Z');
+    assert.equal(context.wallClockToInstant(repeated, timezone, new Date('2026-11-01T09:30:00Z')), null);
+    assert.throws(() => context.wallClockToInstant(wallTime(3, 8, 2, 30), timezone, new Date('2026-03-08T09:30:00Z')));
+});
+
+test('Meet ends follow exact starts in either fall-back occurrence and across the repeated hour', () => {
+    const context = timeContext();
+    for (const start of ['2026-11-01T08:15:00Z', '2026-11-01T09:15:00Z']) {
+        const end = context.meetEndFromEvent(new Date(start), scope(meetLink, '1:15am - 2:15am'), scope());
+        assert.equal(end.toISOString(), '2026-11-01T10:15:00.000Z');
+    }
+    assert.equal(context.meetEndFromEvent(new Date('2026-11-01T08:45:00Z'),
+        scope(meetLink, '1:45am - 1:15am'), scope()).toISOString(), '2026-11-01T09:15:00.000Z');
+    assert.equal(context.meetEndFromEvent(new Date('2026-11-01T09:15:00Z'),
+        scope(meetLink, '1:15am - 1:45am'), scope()).toISOString(), '2026-11-01T09:45:00.000Z');
+});
+
+test('Uncertain DST ends leave clipboard and conference details untouched', async () => {
+    for (const [start, range] of [
+        ['2026-03-08T09:30:00Z', '1:30am - 2:30am'],
+        ['2026-11-01T07:30:00Z', '12:30am - 1:30am'],
+        ['2026-11-01T08:15:00Z', '1:15am - 1:45am']
+    ]) {
+        const result = await copy({ start: new Date(start), popup: scope(meetLink, range) });
+        assert.deepEqual(result.copied, [], range);
+        assert.equal(result.clipboard, existingClipboard, range);
+        assert.deepEqual(result.conferenceCalls, [], range);
+        assert.equal(result.errors.length, 1, range);
+    }
+});
+
+test('Overnight ends use the next date when the earlier same-day wall time was in a spring gap', async () => {
+    const result = await copy({ start: new Date('2026-03-09T06:00:00Z'),
+        popup: scope(meetLink, '11pm - 2:30am') });
+    assert.deepEqual(result.copied, [expectedMessage('Monday, March 9 · 2:00am - 5:30am (11:00pm - 2:30am PDT)')]);
+    assert.deepEqual(result.errors, []);
+});
+
+test('An overnight end that falls in the next day spring gap does not copy', async () => {
+    const result = await copy({ start: new Date('2026-03-08T07:00:00Z'),
+        popup: scope(meetLink, '11pm - 2:30am') });
+    assert.deepEqual(result.copied, []);
+    assert.equal(result.clipboard, existingClipboard);
+    assert.deepEqual(result.conferenceCalls, []);
+    assert.equal(result.errors.length, 1);
+});
+
+test('Meet fall-back ranges label both Pacific offsets including Pacific-only invitations', async () => {
+    for (const [eventTitle, timezone, expectedLine] of [
+        ['Demo Student, PR Time', 'America/Puerto_Rico', 'Sunday, November 1 · 3:30am - 6:15am (12:30am PDT - 2:15am PST)'],
+        ['Demo Student, CA Time', 'America/Los_Angeles', 'Sunday, November 1 · 12:30am PDT - 2:15am PST']
+    ]) {
+        const result = await copy({ eventTitle, timezone, realTimezone: true,
+            start: new Date('2026-11-01T07:30:00Z'), popup: scope(meetLink, '12:30am - 2:15am') });
+        assert.deepEqual(result.copied, [`${eventTitle}\n${expectedLine}\nTime zone: ${timezone}\n${conferenceInfo(meetLink)}`]);
+        assert.deepEqual(result.errors, []);
+    }
+});
+
+test('Wall-clock conversion handles the Lord Howe half-hour fold and spring gap', () => {
+    const context = timeContext();
+    const timezone = 'Australia/Lord_Howe';
+    const repeated = wallTime(4, 5, 1, 45);
+    const first = new Date('2026-04-04T14:45:00Z');
+    const second = new Date('2026-04-04T15:15:00Z');
+    for (const candidate of [first, second]) {
+        const parts = context.timezoneParts(candidate, timezone);
+        assert.equal(parts.month, 4);
+        assert.equal(parts.day, 5);
+        assert.equal(parts.hour, 1);
+        assert.equal(parts.minute, 45);
+    }
+    assert.throws(() => context.wallClockToInstant(repeated, timezone));
+    assert.equal(context.wallClockToInstant(repeated, timezone, first).toISOString(), second.toISOString());
+    assert.equal(context.wallClockToInstant(repeated, timezone, second), null);
+    assert.throws(() => context.wallClockToInstant(wallTime(10, 4, 2, 15), timezone));
+    assert.equal(context.wallClockToInstant(wallTime(10, 4, 2, 30), timezone).toISOString(), '2026-10-03T15:30:00.000Z');
+});
+
+test('Stale recurring start hours and dates do not replace the clipboard', async () => {
+    for (const [start, visible] of [
+        ['2026-11-01T23:00:00Z', 'Sunday, November 1, 2026\n4pm - 5pm'],
+        ['2026-11-02T00:00:00Z', 'Monday, November 2, 2026\n4pm - 5pm']
+    ]) {
+        const result = await copy({ start: new Date(start), popup: scope(meetLink, visible) });
+        assert.deepEqual(result.copied, []);
+        assert.equal(result.clipboard, existingClipboard);
+        assert.deepEqual(result.conferenceCalls, []);
+        assert.equal(result.errors.length, 1);
+    }
+});
+
+test('In-person reminders reject start metadata that disagrees with the visible card', async () => {
+    const result = await copy({ eventTitle: 'Demo Session ##IN PERSON##',
+        start: new Date('2026-11-01T23:00:00Z'), card: scope(null, '', 'Sunday, November 1, 2026, 4pm - 5pm') });
+    assert.deepEqual(result.copied, []);
+    assert.equal(result.clipboard, existingClipboard);
+    assert.equal(result.errors.length, 1);
+});
+
+test('A visible date and time consistent with the exact start can be copied', async () => {
+    const result = await copy({ start: new Date('2026-11-02T00:00:00Z'),
+        popup: scope(meetLink, 'Sunday, November 1, 2026\n4pm - 5pm') });
+    assert.deepEqual(result.copied, [expectedMessage('Sunday, November 1 · 8:00pm - 9:00pm (4:00pm - 5:00pm PST)')]);
+    assert.deepEqual(result.errors, []);
+});
+
+test('Conflicting explicit IANA zones fail while equivalent case aliases remain valid', async () => {
+    const rejected = await copy({ eventTitle: 'Demo Student, America/Phoenix / America/Denver, Chemistry', realTimezone: true });
+    assert.deepEqual(rejected.copied, []);
+    assert.equal(rejected.clipboard, existingClipboard);
+    assert.equal(rejected.errors.length, 1);
+    assert.deepEqual(rejected.conferenceCalls, []);
+    const resolved = resolveTitle('Demo Student, america/phoenix / America/Phoenix, Chemistry');
+    const canonical = new Intl.DateTimeFormat('en-US', { timeZone: resolved.timezone }).resolvedOptions().timeZone;
+    assert.equal(canonical, 'America/Phoenix');
+});
+
+test('Full reminder copies reject either occurrence of a repeated local start', async () => {
+    for (const start of ['2026-11-01T08:30:00Z', '2026-11-01T09:30:00Z']) {
+        const result = await copy({ start: new Date(start),
+            popup: scope(meetLink, 'Sunday, November 1, 2026\n1:30am - 2:30am') });
+        assert.deepEqual(result.copied, [], start);
+        assert.equal(result.clipboard, existingClipboard, start);
+        assert.deepEqual(result.conferenceCalls, [], start);
+        assert.equal(result.errors.length, 1, start);
+    }
+});
+
+test('A stale recurring first-occurrence timestamp cannot validate an identical second-fold display', async () => {
+    const visible = 'Sunday, November 1, 2026\n1:30am - 2:30am';
+    const result = await copy({ start: new Date('2026-11-01T08:30:00Z'),
+        popup: scope(meetLink, visible), card: scope(null, visible, visible), realTimezone: true });
+    assert.deepEqual(result.copied, []);
+    assert.equal(result.clipboard, existingClipboard);
+    assert.deepEqual(result.conferenceCalls, []);
+    assert.equal(result.errors.length, 1);
 });

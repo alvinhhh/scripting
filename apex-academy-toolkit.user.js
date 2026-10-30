@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apex Academy Toolkit
 // @namespace    local.apex.academy.toolkit
-// @version      1.0.7
+// @version      1.0.8
 // @description  Combined Gmail and Google Calendar tools: draft duplication, Apex invoice/payroll helper, student reminder copying, and Day-view calendar labels.
 // @match        https://mail.google.com/*
 // @match        https://calendar.google.com/*
@@ -4751,6 +4751,8 @@
             'AZ': 'America/Phoenix',
             'ARIZONA': 'America/Phoenix',
             'PHOENIX': 'America/Phoenix',
+            'NAVAJO': 'America/Denver',
+            'NAVAJO NATION': 'America/Denver',
 
             // Eastern
             'NY': 'America/New_York',
@@ -4806,6 +4808,8 @@
             'AMERICAN SAMOA': 'Pacific/Pago_Pago',
 
             // International
+            'UTC': 'UTC',
+            'GMT': 'UTC',
             'UK': 'Europe/London',
             'LONDON': 'Europe/London',
 
@@ -5415,27 +5419,21 @@
             title
         ) {
             // Explicit IANA timezone in title
-            const explicit =
-                title.match(
-                    /\b(?:Africa|America|Antarctica|Arctic|Asia|Atlantic|Australia|Europe|Indian|Pacific)\/[A-Za-z0-9_+\-]+(?:\/[A-Za-z0-9_+\-]+)?\b/
-                );
+            const explicit = [...title.matchAll(
+                /\b(?:Africa|America|Antarctica|Arctic|Asia|Atlantic|Australia|Europe|Indian|Pacific|Etc|US|Canada|Mexico|Brazil|Chile)\/[A-Za-z0-9_+\/-]+/gi
+            )];
 
-            if (
-                explicit &&
-                validTimezone(
-                    explicit[0]
-                )
-            ) {
-                return {
-                    label:
-                        explicit[0],
-
-                    raw:
-                        explicit[0],
-
-                    timezone:
-                        explicit[0]
-                };
+            if (explicit.length) {
+                const zones = explicit.map(match => {
+                    if (!validTimezone(match[0])) {
+                        throw new Error(`Unknown timezone "${match[0]}". Correct the event title before copying.`);
+                    }
+                    return new Intl.DateTimeFormat('en-US', { timeZone: match[0] }).resolvedOptions().timeZone;
+                });
+                if (new Set(zones).size > 1) {
+                    throw new Error('The event title contains conflicting timezones. Keep one student timezone before copying.');
+                }
+                return { label: explicit[0][0], raw: explicit[0][0], timezone: zones[0] };
             }
 
             const pieces =
@@ -5448,7 +5446,8 @@
 
             for (const piece of pieces.length > 1 ? pieces.slice(1) : pieces) {
                 const label = piece.replace(/^\((.*)\)$/, '$1').trim();
-                const raw = label.replace(/\s+\(?(?:EST|EDT|ET|PST|PDT|PT|CST|CDT|CT|MST|MDT|MT|AKT|AKST|AKDT|HST|HDT|HAST|HADT|AT|AST|CHST|SST|JST|KST)\)?$/i, '').trim();
+                const raw = label.replace(/\s+Time$/i, '')
+                    .replace(/\s+\(?(?:EST|EDT|ET|PST|PDT|PT|CST|CDT|CT|MST|MDT|MT|AKT|AKST|AKDT|HST|HDT|HAST|HADT|AT|AST|CHST|SST|JST|KST)\)?$/i, '').trim();
 
                 for (const candidate of [label, raw]) {
                     const key = normalizeAlias(candidate);
@@ -5792,7 +5791,7 @@
             december: 12
         };
 
-        function parseDateText(text) {
+        function parseDateText(text, reference = new Date()) {
             const m =
                 String(text || '')
                     .match(
@@ -5822,8 +5821,7 @@
                 };
             }
 
-            const now =
-                new Date();
+            const now = reference;
 
             const years = [
                 now.getFullYear() - 1,
@@ -5839,7 +5837,7 @@
                             month - 1,
                             day
                         ) -
-                        Date.now()
+                        now.getTime()
                     ) -
                     Math.abs(
                         Date.UTC(
@@ -5847,7 +5845,7 @@
                             month - 1,
                             day
                         ) -
-                        Date.now()
+                        now.getTime()
                     )
             );
 
@@ -6076,62 +6074,42 @@
 
         function wallClockToInstant(
             values,
-            timezone
+            timezone,
+            after = null
         ) {
-            const target =
-                Date.UTC(
-                    values.year,
-                    values.month - 1,
-                    values.day,
-                    values.hour,
-                    values.minute,
-                    0
-                );
-
-            let timestamp =
-                target;
-
-            for (
-                let i = 0;
-                i < 5;
-                i++
-            ) {
-                const actual =
-                    timezoneParts(
-                        new Date(
-                            timestamp
-                        ),
-                        timezone
-                    );
-
-                const actualUTC =
-                    Date.UTC(
-                        actual.year,
-                        actual.month - 1,
-                        actual.day,
-                        actual.hour,
-                        actual.minute,
-                        actual.second || 0
-                    );
-
-                const diff =
-                    actualUTC -
-                    target;
-
-                timestamp -=
-                    diff;
-
-                if (
-                    Math.abs(diff) <
-                    1000
-                ) {
-                    break;
-                }
+            if (!Number.isInteger(values.hour) || values.hour < 0 || values.hour > 23 ||
+                !Number.isInteger(values.minute) || values.minute < 0 || values.minute > 59) {
+                throw new Error('Invalid event time. Check the event in Google Calendar.');
             }
 
-            return new Date(
-                timestamp
-            );
+            const target = Date.UTC(values.year, values.month - 1, values.day, values.hour, values.minute);
+            const offsets = new Set();
+
+            // shortcut: sample nearby offsets; use transition data for historical rapid clock changes.
+            for (const hours of [-36, -12, 12, 36]) {
+                const sample = target + hours * 3600000;
+                const parts = timezoneParts(new Date(sample), timezone);
+                offsets.add(Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second) - sample);
+            }
+
+            const candidates = [...offsets].map(offset => new Date(target - offset)).filter(date => {
+                const parts = timezoneParts(date, timezone);
+                return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second) === target;
+            });
+
+            const localTime = new Date(target).toISOString().slice(0, 16).replace('T', ' ');
+            if (!candidates.length) {
+                const error = new Error(`${localTime} does not exist in ${timezone} because the clocks change. Check the event time in Google Calendar.`);
+                error.code = 'NONEXISTENT_LOCAL_TIME';
+                throw error;
+            }
+
+            const remaining = after ? candidates.filter(date => date > after) : candidates;
+            if (remaining.length > 1) {
+                throw new Error(`${localTime} occurs twice in ${timezone} when the clocks change. Confirm the exact event time in Google Calendar and copy the reminder manually.`);
+            }
+
+            return remaining[0] || null;
         }
 
         // ============================================================
@@ -6794,6 +6772,16 @@
                 .toLowerCase();
         }
 
+        function timezoneLabel(date, timezone, label) {
+            const abbreviation = new Intl.DateTimeFormat('en-US', {
+                timeZone: timezone, timeZoneName: 'short'
+            }).formatToParts(date).find(part => part.type === 'timeZoneName').value;
+
+            if (!label) return abbreviation;
+
+            return label.replace(/\b(?:EST|EDT|ET|PST|PDT|PT|CST|CDT|CT|MST|MDT|MT|AKT|AKST|AKDT|HST|HDT|HAST|HADT|AT|AST|CHST|SST|JST|KST)(?=\)?(?:\s+Time)?$)/i, abbreviation);
+        }
+
         function formatDate(
             date,
             timezone
@@ -6850,6 +6838,21 @@
             );
         }
 
+        function validateEventStart(start, popup, card) {
+            const actual = timezoneParts(start, CALENDAR_TIMEZONE);
+            // A recurring instance ID can retain an old start after a reschedule.
+            wallClockToInstant(actual, CALENDAR_TIMEZONE);
+            for (const text of [popup?.innerText, card?.getAttribute?.('aria-label'), card?.innerText]) {
+                const times = parseTimeRange(text);
+                const date = parseDateText(text, start);
+                if ((times && (times.start.hour !== actual.hour || times.start.minute !== actual.minute)) ||
+                    (date && (date.year !== actual.year || date.month !== actual.month || date.day !== actual.day))) {
+                    throw new Error('The displayed event time does not match its saved occurrence. Confirm the event date, time, and Pacific calendar timezone before copying the reminder manually.');
+                }
+                if (times) return;
+            }
+        }
+
         function meetEndFromEvent(start, popup, card) {
             const date = timezoneParts(start, CALENDAR_TIMEZONE);
 
@@ -6861,15 +6864,20 @@
                 const times = parseTimeRange(text);
                 if (!times?.end) continue;
 
-                let end = wallClockToInstant(
-                    { ...date, ...times.end },
-                    CALENDAR_TIMEZONE
-                );
+                let end;
+                try {
+                    end = wallClockToInstant({ ...date, ...times.end }, CALENDAR_TIMEZONE, start);
+                } catch (error) {
+                    // A gap earlier than the start may be an ordinary overnight end on the next date.
+                    if (error.code !== 'NONEXISTENT_LOCAL_TIME' ||
+                        times.end.hour * 60 + times.end.minute > date.hour * 60 + date.minute) throw error;
+                }
 
-                if (end <= start) {
+                if (!end) {
                     end = wallClockToInstant(
                         { ...date, day: date.day + 1, ...times.end },
-                        CALENDAR_TIMEZONE
+                        CALENDAR_TIMEZONE,
+                        start
                     );
                 }
 
@@ -6889,13 +6897,17 @@
             const isPacific = new Intl.DateTimeFormat('en-US', {
                 timeZone: timezone
             }).resolvedOptions().timeZone === CALENDAR_TIMEZONE;
+            const startZone = timezoneLabel(start, timezone);
+            const endZone = timezoneLabel(end, timezone);
+            const pacificStartZone = timezoneLabel(start, CALENDAR_TIMEZONE);
+            const pacificEndZone = timezoneLabel(end, CALENDAR_TIMEZONE);
             const pacificRange = isPacific
                 ? ''
-                : ` (${formatTime(start, CALENDAR_TIMEZONE)} - ${formatTime(end, CALENDAR_TIMEZONE)} PST)`;
+                : ` (${formatTime(start, CALENDAR_TIMEZONE)}${pacificStartZone === pacificEndZone ? '' : ' ' + pacificStartZone} - ${formatTime(end, CALENDAR_TIMEZONE)} ${pacificEndZone})`;
 
             return (
                 `${title}\n` +
-                `${formatDate(start, timezone)} · ${formatTime(start, timezone)} - ${formatTime(end, timezone)}${pacificRange}\n` +
+                `${formatDate(start, timezone)} · ${formatTime(start, timezone)}${startZone === endZone ? '' : ' ' + startZone} - ${formatTime(end, timezone)}${startZone === endZone ? '' : ' ' + endZone}${pacificRange}\n` +
                 `Time zone: ${timezone}\n` +
                 conferenceInfo
             );
@@ -7037,6 +7049,8 @@
                         );
                     }
 
+                    validateEventStart(start, popup, card);
+
                     copyText(
                         makeInPersonMessage(
                             formatTime(
@@ -7110,6 +7124,8 @@
                 // GOOGLE MEET
                 // ----------------------------------------------------
 
+                validateEventStart(start, popup, card);
+
                 const meetLink =
                     findMeetLink(
                         popup
@@ -7158,7 +7174,7 @@
                                 start,
                                 studentTimezone
                             ),
-                            tzInfo.label
+                            timezoneLabel(start, studentTimezone, tzInfo.label)
                         );
 
                     copyText(
